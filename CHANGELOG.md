@@ -4,6 +4,43 @@ All notable changes to `phil/error-tracking-bundle` will be documented in this f
 
 Updates should follow the [Keep a CHANGELOG](https://keepachangelog.com/) principles.
 
+## 0.1.1-alpha - 2026-11-25
+
+### Changed
+
+- The page of a group reads each chain from the top down, the exception thrown first, each previous one marked
+  "Caused by" and the root cause last marked "Root cause"; each run of frames under `vendor/` is folded into a
+  `<details>` element that tells how many it holds and opens without script.
+- The development requirements accept `phil/notifications-bundle` 0.4 and `phil/privacy-bundle` 0.3, the minor versions
+  of their main branches and no earlier one, so that the package installs on its own beside those bundles.
+- Requires the latest minor of each dependency (`doctrine/dbal` 4.6, `symfony/service-contracts` 3.8), and of each
+  development requirement (`doctrine/orm` 3.8, `doctrine/doctrine-bundle` 3.4, `twig/twig` 3.31,
+  `symfony/ux-twig-component` 3.8, …).
+- The development requirements take `twig/twig` 3.31.1 or later, which fixes the advisories of its sandbox published on
+  2026-11-24.
+- The development requirements take `easycorp/easyadmin-bundle` 5.10.4 or later, the release that fixes
+  GHSA-f7rw-7wx5-3c54: a link to a route, like the menu links of this bundle, passed its `routeParams` to the controller
+  of that route as arguments.
+
+### Fixed
+
+- The bundle installs and compiles without `phil/monitoring-bundle`: the configuration no longer reads the highest
+  threshold of new groups from `ErrorStoreCheck`, whose interface comes from that bundle, but from
+  `NewGroupsThreshold::MAX`; the health check is registered only when that bundle is installed and enabled.
+- The handler of the queued alerts is tied to the default bus, the one they are dispatched on: an application with a
+  query bus beside it no longer finds the handler there, and its container compiles.
+- The compiler pass that removes Messenger handlers runs before the one of
+  `symfony/messenger`, which Symfony 8.2.0-RC1 registers in its own bundle at the default priority: the container no
+  longer fails to build with a handler locator that names a removed service.
+
+### Security
+
+- The throttle of the browser errors counted each client by the HMAC of its address under the secret itself,
+  `%kernel.secret%` by default, the same hash other bundles kept for the same address. `BrowserErrorReceiver` derives
+  its key by HKDF-SHA256 under `phil_error_tracking.browser_throttle` (`BrowserErrorReceiver::USAGE`).
+- Conflicts with `easycorp/easyadmin-bundle` below 5.10.4, the release that fixes GHSA-f7rw-7wx5-3c54: an application
+  cannot install this bundle next to a vulnerable EasyAdmin, which stays optional.
+
 ## 0.1.0-alpha - 2026-11-20
 
 ### Added

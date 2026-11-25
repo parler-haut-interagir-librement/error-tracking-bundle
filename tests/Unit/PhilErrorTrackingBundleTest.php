@@ -19,6 +19,7 @@ use Phil\ErrorTrackingBundle\Application\BrowserErrorParser;
 use Phil\ErrorTrackingBundle\Application\BrowserErrorReceiver;
 use Phil\ErrorTrackingBundle\Application\Contract\ErrorGroupReader;
 use Phil\ErrorTrackingBundle\Application\Message\AlertErrorGroup;
+use Phil\ErrorTrackingBundle\Application\NewGroupsThreshold;
 use Phil\ErrorTrackingBundle\Application\SafeCapture;
 use Phil\ErrorTrackingBundle\Infrastructure\Console\ConsoleErrorListener;
 use Phil\ErrorTrackingBundle\Infrastructure\Console\PurgeCommand;
@@ -42,6 +43,7 @@ use Phil\ErrorTrackingBundle\Infrastructure\RateLimit\LimiterCaptureThrottle;
 use Phil\ErrorTrackingBundle\Infrastructure\RateLimiter\RateLimiterThrottle;
 use Phil\ErrorTrackingBundle\PhilErrorTrackingBundle;
 use Phil\IpAnonymizer\Truncation;
+use Phil\MonitoringBundle\PhilMonitoringBundle;
 use Phil\NotificationsBundle\Application\Notifications;
 use Phil\NotificationsBundle\Domain\Exception\InvalidNotification;
 use Phil\NotificationsBundle\PhilNotificationsBundle;
@@ -55,11 +57,15 @@ use RuntimeException;
 use stdClass;
 use Symfony\Component\AssetMapper\AssetMapperBundle;
 use Symfony\Component\Config\Definition\Exception\InvalidConfigurationException;
+use Symfony\Component\DependencyInjection\Compiler\CompilerPassInterface;
+use Symfony\Component\DependencyInjection\Compiler\PassConfig;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 use Symfony\Component\DependencyInjection\Extension\PrependExtensionInterface;
 use Symfony\Component\DependencyInjection\Reference;
+use Symfony\Component\Messenger\DependencyInjection\MessengerPass;
 use Symfony\Component\Messenger\Event\WorkerMessageFailedEvent;
+use Symfony\Component\Messenger\MessengerBundle;
 use Symfony\Component\RateLimiter\RateLimiterFactory;
 use Symfony\Component\RateLimiter\Storage\CacheStorage;
 
@@ -262,13 +268,24 @@ final class PhilErrorTrackingBundleTest extends TestCase
 
     public function testTheHealthCheck(): void
     {
-        $definition = $this->load([])->getDefinition(ErrorStoreCheck::class);
+        $monitoring = ['PhilMonitoringBundle' => PhilMonitoringBundle::class];
+        $definition = $this->load([], $monitoring)->getDefinition(ErrorStoreCheck::class);
 
         self::assertEquals([new Reference(ErrorGroupReader::class), new Reference('clock'), 20, 900], $definition->getArguments());
         self::assertTrue($definition->isAutoconfigured());
 
-        self::assertSame([5, 60], \array_slice($this->load(['health_check' => ['new_groups' => 5, 'window' => 60]])->getDefinition(ErrorStoreCheck::class)->getArguments(), 2));
-        self::assertFalse($this->load(['health_check' => false])->hasDefinition(ErrorStoreCheck::class));
+        self::assertSame([5, 60], \array_slice($this->load(['health_check' => ['new_groups' => 5, 'window' => 60]], $monitoring)->getDefinition(ErrorStoreCheck::class)->getArguments(), 2));
+        self::assertSame(NewGroupsThreshold::MAX, $this->load(['health_check' => ['new_groups' => NewGroupsThreshold::MAX]], $monitoring)->getDefinition(ErrorStoreCheck::class)->getArgument(2));
+        self::assertFalse($this->load(['health_check' => false], $monitoring)->hasDefinition(ErrorStoreCheck::class));
+        self::assertFalse($this->load([])->hasDefinition(ErrorStoreCheck::class), 'without phil/monitoring-bundle enabled');
+    }
+
+    public function testTheThresholdOfNewGroupsIsBounded(): void
+    {
+        self::assertSame(NewGroupsThreshold::MAX, ErrorStoreCheck::MAX_NEW_GROUPS);
+        $this->expectException(InvalidConfigurationException::class);
+
+        $this->load(['health_check' => ['new_groups' => NewGroupsThreshold::MAX + 1]]);
     }
 
     public function testTheAlertsThroughNotifications(): void
@@ -563,6 +580,7 @@ final class PhilErrorTrackingBundleTest extends TestCase
             self::fail('The build accepted a malformed prefix.');
         } catch (InvalidConfigurationException $invalidConfigurationException) {
             self::assertInstanceOf(InvalidOption::class, $invalidConfigurationException->getPrevious());
+            self::assertSame(0, $invalidConfigurationException->getCode());
         }
     }
 
@@ -595,5 +613,39 @@ final class PhilErrorTrackingBundleTest extends TestCase
         $extension->load([$config], $container);
 
         return $container;
+    }
+
+    public function testTheHandlersAreRemovedBeforeMessengerWiresThem(): void
+    {
+        $container = new ContainerBuilder();
+        new MessengerBundle()->build($container);
+        new PhilErrorTrackingBundle()->build($container);
+
+        $passes = array_map(static fn (object $pass): string => $pass::class, $container->getCompilerPassConfig()->getBeforeOptimizationPasses());
+        $messenger = array_search(MessengerPass::class, $passes, true);
+        self::assertIsInt($messenger);
+
+        $removal = array_search(AlertsPass::class, $passes, true);
+        self::assertIsInt($removal);
+        self::assertLessThan($messenger, $removal);
+    }
+
+    public function testThePassesRunAtPriorityOneNotHigher(): void
+    {
+        $container = new ContainerBuilder();
+        new PhilErrorTrackingBundle()->build($container);
+        $container->addCompilerPass(new class implements CompilerPassInterface {
+            public function process(ContainerBuilder $container): void
+            {
+            }
+        }, PassConfig::TYPE_BEFORE_OPTIMIZATION, 2);
+
+        $passes = array_map(static fn (object $pass): string => $pass::class, $container->getCompilerPassConfig()->getBeforeOptimizationPasses());
+        $marker = array_search(true, array_map(static fn (string $class): bool => str_contains($class, '@anonymous'), $passes), true);
+        self::assertIsInt($marker);
+
+        $removal = array_search(AlertsPass::class, $passes, true);
+        self::assertIsInt($removal);
+        self::assertGreaterThan($marker, $removal, 'AlertsPass must run at priority 1, after a pass of priority 2.');
     }
 }
